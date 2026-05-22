@@ -6,50 +6,62 @@ Common setup that every experiment imports instead of copy-pasting.
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  OFFLINE MODE — must run BEFORE deepchem is imported anywhere.
-#  DeepChem's CGCNNFeaturizer calls download_url() unconditionally at import
-#  time. On an offline cluster this raises URLError. We:
-#    1. point DeepChem's data dir at a folder inside THIS project, and
-#    2. monkey-patch download_url so it copies from our offline_data folder
-#       (or no-ops) instead of hitting the network.
+#  DeepChem's CGCNNFeaturizer calls download_url() at IMPORT TIME (inside
+#  deepchem/__init__.py → molnet → CGCNN). That means we cannot patch deepchem
+#  itself — the crash happens during deepchem's own import.
+#
+#  Instead we patch the stdlib network primitives (urllib.request) that deepchem
+#  ultimately calls. urllib.request has no import side effects, so patching it
+#  first guarantees no network access when deepchem later imports.
+#
+#  If a pre-staged copy of the requested file exists in offline_data/, it is
+#  copied to the destination; otherwise the call becomes a harmless no-op.
 #  No files inside the environment/site-packages are modified.
 # ══════════════════════════════════════════════════════════════════════════════
 import os
 import shutil
+import urllib.request as _urlreq
 
-_PROJECT_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_OFFLINE_DIR   = os.path.join(_PROJECT_ROOT, "offline_data")
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_OFFLINE_DIR  = os.path.join(_PROJECT_ROOT, "offline_data")
 
-# DeepChem reads this env var to decide where to store/look for data files.
 os.environ["DEEPCHEM_DATA_DIR"] = _OFFLINE_DIR
 os.makedirs(_OFFLINE_DIR, exist_ok=True)
 
-# Patch download_url to avoid all network access.
-import deepchem.utils.data_utils as _dc_data_utils
+_real_urlretrieve = _urlreq.urlretrieve
 
-def _offline_download_url(url, dest_dir=None, name=None):
-    """Drop-in offline replacement for deepchem download_url."""
-    if dest_dir is None:
-        dest_dir = _dc_data_utils.get_data_dir()
-    if name is None:
-        name = url.split("/")[-1]
-    dest_path = os.path.join(dest_dir, name)
+def _offline_urlretrieve(url, filename=None, *args, **kwargs):
+    """Offline replacement for urllib.request.urlretrieve — never hits network."""
+    name = url.split("/")[-1]
 
-    if os.path.exists(dest_path):
-        return  # already present, nothing to do
+    # destination DeepChem wants
+    if filename is None:
+        filename = os.path.join(_OFFLINE_DIR, name)
 
-    # try to copy a pre-staged copy from offline_data/
+    # already there
+    if os.path.exists(filename):
+        return filename, None
+
+    # copy from staged offline_data/ if available
     staged = os.path.join(_OFFLINE_DIR, name)
-    if os.path.exists(staged) and os.path.abspath(staged) != os.path.abspath(dest_path):
-        os.makedirs(dest_dir, exist_ok=True)
-        shutil.copy(staged, dest_path)
-        return
+    if os.path.exists(staged) and os.path.abspath(staged) != os.path.abspath(filename):
+        os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
+        shutil.copy(staged, filename)
+        return filename, None
 
-    # nothing available; warn but do NOT attempt network (offline cluster)
+    # nothing available: create an empty placeholder so callers that only need
+    # the file to *exist* (not its contents) can proceed, and warn loudly.
     import warnings as _w
-    _w.warn(f"[offline] skipping download of {name}; file not found locally.")
+    _w.warn(f"[offline] network blocked; '{name}' not found in offline_data/. "
+            f"Writing empty placeholder at {filename}.")
+    os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
+    open(filename, "a").close()
+    return filename, None
 
-_dc_data_utils.download_url = _offline_download_url
+# install the patch BEFORE any deepchem import
+_urlreq.urlretrieve = _offline_urlretrieve
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 import warnings
 import numpy as np
