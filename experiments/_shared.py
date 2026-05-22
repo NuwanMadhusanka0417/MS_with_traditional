@@ -4,6 +4,53 @@ experiments/_shared.py
 Common setup that every experiment imports instead of copy-pasting.
 """
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  OFFLINE MODE — must run BEFORE deepchem is imported anywhere.
+#  DeepChem's CGCNNFeaturizer calls download_url() unconditionally at import
+#  time. On an offline cluster this raises URLError. We:
+#    1. point DeepChem's data dir at a folder inside THIS project, and
+#    2. monkey-patch download_url so it copies from our offline_data folder
+#       (or no-ops) instead of hitting the network.
+#  No files inside the environment/site-packages are modified.
+# ══════════════════════════════════════════════════════════════════════════════
+import os
+import shutil
+
+_PROJECT_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_OFFLINE_DIR   = os.path.join(_PROJECT_ROOT, "offline_data")
+
+# DeepChem reads this env var to decide where to store/look for data files.
+os.environ["DEEPCHEM_DATA_DIR"] = _OFFLINE_DIR
+os.makedirs(_OFFLINE_DIR, exist_ok=True)
+
+# Patch download_url to avoid all network access.
+import deepchem.utils.data_utils as _dc_data_utils
+
+def _offline_download_url(url, dest_dir=None, name=None):
+    """Drop-in offline replacement for deepchem download_url."""
+    if dest_dir is None:
+        dest_dir = _dc_data_utils.get_data_dir()
+    if name is None:
+        name = url.split("/")[-1]
+    dest_path = os.path.join(dest_dir, name)
+
+    if os.path.exists(dest_path):
+        return  # already present, nothing to do
+
+    # try to copy a pre-staged copy from offline_data/
+    staged = os.path.join(_OFFLINE_DIR, name)
+    if os.path.exists(staged) and os.path.abspath(staged) != os.path.abspath(dest_path):
+        os.makedirs(dest_dir, exist_ok=True)
+        shutil.copy(staged, dest_path)
+        return
+
+    # nothing available; warn but do NOT attempt network (offline cluster)
+    import warnings as _w
+    _w.warn(f"[offline] skipping download of {name}; file not found locally.")
+
+_dc_data_utils.download_url = _offline_download_url
+# ══════════════════════════════════════════════════════════════════════════════
+
 import warnings
 import numpy as np
 import pandas as pd
@@ -23,14 +70,14 @@ from models.graphcnnVSA_Binding_FULL import GraphCNN
 from src import utilities
 
 # ── constants shared across all experiments ───────────────────────────────────
-NUM_LAYERS             = 4
-DELTA                  = 0
+NUM_LAYERS             = 5
+DELTA                  = 1
 EQUATION               = 10
 GRAPH_POOL             = "sum"
 NEIGHBOR_POOL          = "sum"
 DEVICE                 = torch.device("cpu")
 
-DEFAULT_HV_DIMS        = [1000, 2000, 5000, 10000]
+DEFAULT_HV_DIMS        = [100, 500, 1000, 2000, 5000, 10000]
 
 XGB_PARAMS = dict(
     n_estimators    = 2000,
@@ -52,7 +99,7 @@ DESC_DETAIL = "123 RDKit + 128 Morgan FP + 7 func-groups + 38 engineered"
 
 def load_traditional_features():
     """Return (df298_train, df298_test, train_set, test_set)."""
-    train_set = pd.read_csv("final_data/final_unique_train.csv")
+    train_set = pd.read_csv("final_data/final_unique_train_fixed.csv")
     test_set  = pd.read_csv("final_data/final_unique_test.csv")
 
     df123_train = utilities.generate123(train_set.smiles_canon)
