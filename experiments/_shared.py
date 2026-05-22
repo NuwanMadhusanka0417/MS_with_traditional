@@ -52,7 +52,7 @@ DESC_DETAIL = "123 RDKit + 128 Morgan FP + 7 func-groups + 38 engineered"
 
 def load_traditional_features():
     """Return (df298_train, df298_test, train_set, test_set)."""
-    train_set = pd.read_csv("final_data/final_unique_train_fixed.csv")
+    train_set = pd.read_csv("final_data/final_unique_train.csv")
     test_set  = pd.read_csv("final_data/final_unique_test.csv")
 
     df123_train = utilities.generate123(train_set.smiles_canon)

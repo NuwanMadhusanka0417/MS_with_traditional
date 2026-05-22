@@ -55,7 +55,7 @@ class ZINCLikeCSV(InMemoryDataset):
                 graphs.append(g)
         self.data, self.slices = self.collate(graphs)
 
-def load_data(dataset="old", train_path=None, test_path=None, smiles_col=None, target_col=None, seed=42):
+def load_data(dataset="new", train_path=None, test_path=None, smiles_col=None, target_col=None, seed=42):
   """
   Load train/test data with a choice of dataset source.
 
