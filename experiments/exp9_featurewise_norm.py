@@ -33,7 +33,6 @@ import torch
 from sklearn.impute import SimpleImputer
 
 from experiments._shared import (
-    load_traditional_features,
     build_gvfa_embeddings,
     fit_xgb_and_report,
     to_numpy,
@@ -174,8 +173,14 @@ def run():
     print(f"\n[Exp 9] Type-aware feature-wise normalization | HV dim = {HV_DIM}")
     print(f"        binary→{{-1,+1}}  near-const→drop  continuous→tanh(IQR)\n")
 
-    # ── traditional features ─────────────────────────────────────────────────
-    df298_train, df298_test, _, _ = load_traditional_features()
+    # ── traditional features (aligned — drops RDKit-failed rows) ─────────────
+    from experiments._shared import (
+        load_traditional_features_aligned,
+        build_gvfa_embeddings_for_smiles,
+    )
+    df298_train, df298_test, \
+        train_smiles, test_smiles, \
+        y_train, y_test = load_traditional_features_aligned()
 
     norm = TypeAwareNormalizer()
     norm.fit(df298_train)
@@ -185,9 +190,16 @@ def run():
 
     print(f"  Descriptor block shape after norm: train={desc_tr.shape}  test={desc_te.shape}")
 
-    # ── GVFA embeddings ──────────────────────────────────────────────────────
-    train_emb, test_emb, train_labels, test_labels = build_gvfa_embeddings(HV_DIM)
-    gvfa_tr, gvfa_te = to_numpy(train_emb, test_emb)
+    # ── GVFA embeddings — filtered to same SMILES as descriptor rows ──────────
+    gvfa_tr, gvfa_te, y_train, y_test = build_gvfa_embeddings_for_smiles(
+        train_smiles, test_smiles, y_train, y_test, HV_DIM
+    )
+
+    # ── sanity check ─────────────────────────────────────────────────────────
+    assert desc_tr.shape[0] == gvfa_tr.shape[0], \
+        f"Row mismatch after alignment: desc={desc_tr.shape[0]}, gvfa={gvfa_tr.shape[0]}"
+    assert desc_te.shape[0] == gvfa_te.shape[0], \
+        f"Row mismatch after alignment: desc={desc_te.shape[0]}, gvfa={gvfa_te.shape[0]}"
 
     # ── concatenate ──────────────────────────────────────────────────────────
     X_train = np.concatenate([desc_tr, gvfa_tr], axis=1)
@@ -195,8 +207,6 @@ def run():
 
     X_train = clean_nan(X_train)
     X_test  = clean_nan(X_test)
-
-    y_train, y_test = to_numpy(train_labels, test_labels)
 
     print(f"  Final X_train shape: {X_train.shape}")
     print(f"  Final X_test  shape: {X_test.shape}\n")

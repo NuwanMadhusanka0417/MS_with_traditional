@@ -110,23 +110,74 @@ DESC_DETAIL = "123 RDKit + 128 Morgan FP + 7 func-groups + 38 engineered"
 # ── reusable building blocks ──────────────────────────────────────────────────
 
 def load_traditional_features():
-    """Return (df298_train, df298_test, train_set, test_set)."""
+    """
+    Return (df298_train, df298_test, train_set, test_set).
+
+    Row counts in the returned dataframes are guaranteed to match
+    train_set / test_set because we reset indices and drop any rows
+    that contain ALL-NaN (produced when RDKit silently fails on a SMILES).
+    """
     train_set = pd.read_csv("final_data/final_unique_train_fixed.csv")
     test_set  = pd.read_csv("final_data/final_unique_test.csv")
 
-    df123_train = utilities.generate123(train_set.smiles_canon)
-    df123_test  = utilities.generate123(test_set.smiles_canon)
-    df128_train = utilities.fingerprint(train_set.smiles_canon, 2, 128)
-    df128_test  = utilities.fingerprint(test_set.smiles_canon,  2, 128)
-    df7_train   = utilities.get_functional_groups(train_set.smiles_canon)
-    df7_test    = utilities.get_functional_groups(test_set.smiles_canon)
-    df38_train  = utilities.generate_features38(train_set.smiles_canon)
-    df38_test   = utilities.generate_features38(test_set.smiles_canon)
+    # reset index so concat aligns by position
+    train_set = train_set.reset_index(drop=True)
+    test_set  = test_set.reset_index(drop=True)
+
+    df123_train = utilities.generate123(train_set.smiles_canon).reset_index(drop=True)
+    df123_test  = utilities.generate123(test_set.smiles_canon).reset_index(drop=True)
+    df128_train = utilities.fingerprint(train_set.smiles_canon, 2, 128).reset_index(drop=True)
+    df128_test  = utilities.fingerprint(test_set.smiles_canon,  2, 128).reset_index(drop=True)
+    df7_train   = utilities.get_functional_groups(train_set.smiles_canon).reset_index(drop=True)
+    df7_test    = utilities.get_functional_groups(test_set.smiles_canon).reset_index(drop=True)
+    df38_train  = utilities.generate_features38(train_set.smiles_canon).reset_index(drop=True)
+    df38_test   = utilities.generate_features38(test_set.smiles_canon).reset_index(drop=True)
 
     df298_train = pd.concat([df123_train, df128_train, df7_train, df38_train], axis=1)
     df298_test  = pd.concat([df123_test,  df128_test,  df7_test,  df38_test],  axis=1)
 
+    # find rows where RDKit silently failed (entire row is NaN) and drop them
+    # from BOTH the feature df and the corresponding dataset rows so they stay aligned
+    train_valid = df298_train.notna().any(axis=1)
+    test_valid  = df298_test.notna().any(axis=1)
+
+    n_dropped_train = (~train_valid).sum()
+    n_dropped_test  = (~test_valid).sum()
+    if n_dropped_train > 0:
+        print(f"  [load_traditional_features] dropped {n_dropped_train} "
+              f"train rows where RDKit returned all-NaN")
+    if n_dropped_test > 0:
+        print(f"  [load_traditional_features] dropped {n_dropped_test} "
+              f"test rows where RDKit returned all-NaN")
+
+    df298_train = df298_train[train_valid].reset_index(drop=True)
+    df298_test  = df298_test[test_valid].reset_index(drop=True)
+    train_set   = train_set[train_valid].reset_index(drop=True)
+    test_set    = test_set[test_valid].reset_index(drop=True)
+
     return df298_train, df298_test, train_set, test_set
+
+
+def load_traditional_features_aligned():
+    """
+    Same as load_traditional_features() but also filters the GVFA-compatible
+    molecule list to the same valid SMILES — use this when you need to
+    concatenate descriptor features with GVFA embeddings row-by-row.
+
+    Returns (df298_train, df298_test, train_smiles, test_smiles,
+             train_labels, test_labels)
+    where train_smiles / test_smiles are the SMILES strings that survived
+    RDKit feature generation, for passing to build_gvfa_embeddings_for_smiles().
+    """
+    df298_train, df298_test, train_set, test_set = load_traditional_features()
+    return (
+        df298_train,
+        df298_test,
+        train_set["smiles_canon"].tolist(),
+        test_set["smiles_canon"].tolist(),
+        train_set["logS"].values.astype(np.float32),
+        test_set["logS"].values.astype(np.float32),
+    )
 
 
 def build_gvfa_embeddings(hv_dim: int):
@@ -154,6 +205,55 @@ def build_gvfa_embeddings(hv_dim: int):
         test_emb.squeeze(0),
         train_labels,
         test_labels,
+    )
+
+
+def build_gvfa_embeddings_for_smiles(train_smiles, test_smiles,
+                                      train_labels_np, test_labels_np,
+                                      hv_dim: int):
+    """
+    Build GVFA embeddings for a specific list of SMILES strings (already
+    filtered to match the descriptor feature rows).
+
+    Use this instead of build_gvfa_embeddings() when concatenating with
+    traditional descriptors, to guarantee row alignment.
+
+    Returns (train_emb_np, test_emb_np, train_labels_np, test_labels_np)
+    all as float32 numpy arrays.
+    """
+    train_data, test_data = load_data()
+
+    # build a smiles → row lookup from the full dataset
+    def _filter_by_smiles(data, keep_smiles):
+        keep_set = set(keep_smiles)
+        return [d for d in data if d.smiles in keep_set]
+
+    train_data_f = _filter_by_smiles(train_data, train_smiles)
+    test_data_f  = _filter_by_smiles(test_data,  test_smiles)
+
+    n_before = len(train_data)
+    n_after  = len(train_data_f)
+    if n_before != n_after:
+        print(f"  [build_gvfa_for_smiles] train: {n_before} → {n_after} "
+              f"(filtered to match descriptor rows)")
+
+    train_graphs = create_graph_list(train_data_f)
+    test_graphs  = create_graph_list(test_data_f)
+
+    train_HVs = VSA_conversion(train_graphs.copy(), hv_dim)
+    test_HVs  = VSA_conversion(test_graphs.copy(),  hv_dim)
+
+    in_dim = test_HVs[0].node_features.shape[1]
+    model  = GraphCNN(in_dim, NUM_LAYERS, DELTA, GRAPH_POOL, NEIGHBOR_POOL, DEVICE, EQUATION)
+
+    train_emb, _ = getEmbedding(model, DEVICE, train_HVs)
+    test_emb,  _ = getEmbedding(model, DEVICE, test_HVs)
+
+    return (
+        to_numpy(train_emb.squeeze(0)),
+        to_numpy(test_emb.squeeze(0)),
+        train_labels_np,
+        test_labels_np,
     )
 
 
