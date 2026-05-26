@@ -474,19 +474,33 @@ def fit_and_predict(regressor_name, X_train, y_train, X_test, y_test):
     """Fit the chosen regressor and return predictions on the test set."""
     model = build_regressor(regressor_name)
 
-    # Linear / SVR models are sensitive to NaN/inf and need 1-D labels.
+    # Always clean labels (all regressors need finite 1-D targets).
     y_train = np.nan_to_num(np.asarray(y_train).ravel(),
                             nan=0.0, posinf=1e6, neginf=-1e6)
-    y_test = np.nan_to_num(np.asarray(y_test).ravel(),
-                           nan=0.0, posinf=1e6, neginf=-1e6)
+    y_test  = np.nan_to_num(np.asarray(y_test).ravel(),
+                            nan=0.0, posinf=1e6, neginf=-1e6)
 
     if regressor_name == "xgb":
+        # XGBoost handles NaN natively (uses them as a split direction signal),
+        # so we leave X_train / X_test untouched.
         model.fit(
             X_train, y_train,
             eval_set=[(X_test, y_test)],
             verbose=False,
         )
     else:
+        # SVR and Ridge require fully finite feature matrices.
+        # The descriptor pipeline leaves partial-NaN rows (molecules where SOME
+        # descriptors failed but not all).  Replace NaN / ±inf with 0 so the
+        # regressor receives clean float64 input.
+        X_train = np.nan_to_num(
+            np.asarray(X_train, dtype=np.float64),
+            nan=0.0, posinf=1e6, neginf=-1e6,
+        )
+        X_test = np.nan_to_num(
+            np.asarray(X_test, dtype=np.float64),
+            nan=0.0, posinf=1e6, neginf=-1e6,
+        )
         model.fit(X_train, y_train)
 
     return model.predict(X_test), y_test
