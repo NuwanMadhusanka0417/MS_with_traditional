@@ -397,8 +397,11 @@ def combine_features(method,
         X_test = scaler_full.transform(X_test)
 
     elif method == "concat_rp":
-        # cell 21 : random-project descriptors to HV dim, then concat
-        proj = GaussianRandomProjection(n_components=hv_dim, random_state=rp_seed)
+        # cell 21 : random-project descriptors to HV dim, then concat.
+        # Use the actual GVFA width (hv_dim+1 when use_size_aware=True in
+        # getEmbedding) so the projected descriptor block mirrors the GVFA block.
+        gvfa_actual_dim = gvfa_train.shape[1]
+        proj = GaussianRandomProjection(n_components=gvfa_actual_dim, random_state=rp_seed)
         d_tr = np.nan_to_num(desc_train, nan=0.0, posinf=0.0, neginf=0.0)
         d_te = np.nan_to_num(desc_test, nan=0.0, posinf=0.0, neginf=0.0)
         d_tr = proj.fit_transform(d_tr).astype(np.float32)
@@ -416,8 +419,13 @@ def combine_features(method,
 
     elif method == "superposition":
         # cells 25-26 : impute->robust->random-project descriptors to HV dim,
-        # element-wise add to GVFA, then L2-normalize rows
-        pipe = _make_clean_pipeline(rp_dim=hv_dim, use_knn=False)
+        # element-wise add to GVFA, then L2-normalize rows.
+        #
+        # getEmbedding appends num_nodes as an extra column (use_size_aware=True),
+        # so the actual GVFA width is hv_dim+1, not hv_dim.  We project
+        # descriptors to gvfa_train.shape[1] so both sides always match.
+        gvfa_actual_dim = gvfa_train.shape[1]
+        pipe = _make_clean_pipeline(rp_dim=gvfa_actual_dim, use_knn=False)
         Xtr_df = pipe._prep(df298_train).astype(np.float32)
         Xte_df = pipe._prep(df298_test).astype(np.float32)
         d_tr = pipe.fit_transform(Xtr_df).astype(np.float32)
