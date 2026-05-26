@@ -158,66 +158,121 @@ RDLogger.DisableLog("rdApp.*")
 # 1. Traditional descriptor extraction
 # ---------------------------------------------------------------------------
 def build_traditional_features(train_set, test_set):
-    """Build the 298-dimensional traditional descriptor set.
+    """Build the 298-dimensional traditional descriptor set and alignment masks.
 
     298 = 123 RDKit descriptors + 128 Morgan fingerprint bits
           + 7 functional-group counts + 38 engineered structural features.
 
-    Mirrors notebook cells 2-3.
+    Mirrors notebook cells 2-3 and the alignment logic in experiments/_shared.py.
+
+    Every sub-frame is reset_index'd before concatenation so that pandas aligns
+    rows by position rather than by whatever index a featurizer happens to
+    produce.  The FULL (unfiltered) concat is used to build a boolean mask —
+    True where a molecule has at least one valid (non-NaN) descriptor.  That
+    mask is returned so the caller can apply it to the GVFA embeddings, which
+    are built from the same CSV and therefore have one row per CSV molecule.
+
+    Returns
+    -------
+    df298_train, df298_test : filtered DataFrames (invalid molecules removed)
+    train_valid_mask, test_valid_mask : bool ndarray, shape [N_csv_train/test]
+        Index these into the GVFA embedding arrays to align both sides.
     """
     print("Generating traditional descriptors ...")
 
-    df123_train = utilities.generate123(train_set.smiles_canon)
-    df123_test = utilities.generate123(test_set.smiles_canon)
+    # .reset_index(drop=True) ensures position-based alignment in pd.concat
+    # regardless of what index the individual featurizers produce.
+    df123_train = utilities.generate123(train_set.smiles_canon).reset_index(drop=True)
+    df123_test  = utilities.generate123(test_set.smiles_canon).reset_index(drop=True)
 
-    df38_train = utilities.generate_features38(train_set.smiles_canon)
-    df38_test = utilities.generate_features38(test_set.smiles_canon)
+    df38_train  = utilities.generate_features38(train_set.smiles_canon).reset_index(drop=True)
+    df38_test   = utilities.generate_features38(test_set.smiles_canon).reset_index(drop=True)
 
-    df7_train = utilities.get_functional_groups(train_set.smiles_canon)
-    df7_test = utilities.get_functional_groups(test_set.smiles_canon)
+    df7_train   = utilities.get_functional_groups(train_set.smiles_canon).reset_index(drop=True)
+    df7_test    = utilities.get_functional_groups(test_set.smiles_canon).reset_index(drop=True)
 
-    df128_train = utilities.fingerprint(train_set.smiles_canon, 2, 128)
-    df128_test = utilities.fingerprint(test_set.smiles_canon, 2, 128)
+    df128_train = utilities.fingerprint(train_set.smiles_canon, 2, 128).reset_index(drop=True)
+    df128_test  = utilities.fingerprint(test_set.smiles_canon, 2, 128).reset_index(drop=True)
 
-    df298_train = pd.concat([df123_train, df128_train, df7_train, df38_train], axis=1)
-    df298_test = pd.concat([df123_test, df128_test, df7_test, df38_test], axis=1)
+    # Full (unfiltered) concat — one row per CSV molecule, NaN where failed.
+    df298_full_train = pd.concat(
+        [df123_train, df128_train, df7_train, df38_train], axis=1
+    )
+    df298_full_test = pd.concat(
+        [df123_test, df128_test, df7_test, df38_test], axis=1
+    )
+
+    # Boolean mask: True = at least one descriptor is non-NaN (molecule is valid).
+    # Length equals the FULL CSV row count so it can index into GVFA embeddings.
+    train_valid = df298_full_train.notna().any(axis=1).values
+    test_valid  = df298_full_test.notna().any(axis=1).values
+
+    n_drop_tr = int((~train_valid).sum())
+    n_drop_te = int((~test_valid).sum())
+    if n_drop_tr:
+        print(f"  [align] dropped {n_drop_tr} train molecules "
+              f"(all-NaN descriptors — same rows will be dropped from GVFA)")
+    if n_drop_te:
+        print(f"  [align] dropped {n_drop_te} test molecules "
+              f"(all-NaN descriptors — same rows will be dropped from GVFA)")
+
+    df298_train = df298_full_train[train_valid].reset_index(drop=True)
+    df298_test  = df298_full_test[test_valid].reset_index(drop=True)
 
     print(f"Traditional feature matrix: train {df298_train.shape}, "
           f"test {df298_test.shape}")
-    return df298_train, df298_test
+    return df298_train, df298_test, train_valid, test_valid
 
 
 # ---------------------------------------------------------------------------
 # 2. GVFA embedding extraction
 # ---------------------------------------------------------------------------
 def build_gvfa_embeddings(hv_dim,
+                          train_csv,
+                          test_csv,
+                          train_valid_mask,
+                          test_valid_mask,
                           num_layers=5,
                           delta=1,
                           equation=10,
                           graph_pooling_type="sum",
                           neighbor_pooling_type="sum",
                           device=None):
-    """Run the GVFA pipeline and return (train_emb, train_labels,
-    test_emb, test_labels) as torch tensors / numpy labels.
+    """Run the GVFA pipeline and return aligned (train_emb, train_labels,
+    test_emb, test_labels) as float32 numpy arrays.
 
-    Graphs are rebuilt per HV dimension exactly like the notebook. Inside,
-    fresh copies of the graph lists are used for VSA_conversion so the
-    original lists are not mutated across dimensions.
+    Graphs are rebuilt per HV dimension exactly like the notebook.
+
+    The GVFA pipeline (ZINCLikeCSV) keeps every molecule that basic RDKit can
+    parse, which may be more molecules than the descriptor pipeline accepts.
+    We apply train_valid_mask / test_valid_mask — derived from the descriptor
+    step — to select the same molecule subset in both feature sets.
+
+    Parameters
+    ----------
+    train_csv, test_csv : str
+        Paths to the same CSV files used for traditional features.
+    train_valid_mask, test_valid_mask : bool ndarray
+        Returned by build_traditional_features.  Length must equal the number
+        of rows in the respective CSV (i.e. the GVFA embedding count).
     """
     if device is None:
         device = torch.device("cpu")
 
-    train_data, test_data = load_data()
+    # Load from the same CSVs as the descriptor pipeline so molecule ordering
+    # is identical and the boolean masks index the correct rows.
+    train_data, test_data = load_data(
+        dataset="new",
+        train_path=train_csv,
+        test_path=test_csv,
+    )
 
     train_graphs = create_graph_list(train_data)
-    test_graphs = create_graph_list(test_data)
+    test_graphs  = create_graph_list(test_data)
 
-    # Use deep copies for the projection step to avoid mutating originals.
-    ts_graph = copy.deepcopy(test_graphs)
-    tr_graph = copy.deepcopy(train_graphs)
-
-    test_HVs = VSA_conversion(ts_graph, hv_dim)
-    train_HVs = VSA_conversion(tr_graph, hv_dim)
+    # Use copies for the projection step to avoid mutating originals.
+    test_HVs  = VSA_conversion(copy.deepcopy(test_graphs),  hv_dim)
+    train_HVs = VSA_conversion(copy.deepcopy(train_graphs), hv_dim)
 
     in_dim = test_HVs[0].node_features.shape[1]
     model = GraphCNN(
@@ -231,12 +286,41 @@ def build_gvfa_embeddings(hv_dim,
     )
 
     train_emb, train_labels = getEmbedding(model, device, train_HVs)
-    test_emb, test_labels = getEmbedding(model, device, test_HVs)
+    test_emb,  test_labels  = getEmbedding(model, device, test_HVs)
 
-    train_emb = train_emb.squeeze(0)
-    test_emb = test_emb.squeeze(0)
+    # Convert to float32 numpy for masking and downstream use.
+    gvfa_tr = _to_numpy_f32(train_emb.squeeze(0))   # [N_full_train, D]
+    gvfa_te = _to_numpy_f32(test_emb.squeeze(0))    # [N_full_test,  D]
+    y_tr    = np.asarray(train_labels.cpu()).ravel().astype(np.float32)
+    y_te    = np.asarray(test_labels.cpu()).ravel().astype(np.float32)
 
-    return train_emb, train_labels, test_emb, test_labels
+    n_full_tr, n_full_te = gvfa_tr.shape[0], gvfa_te.shape[0]
+    n_keep_tr = int(train_valid_mask.sum())
+    n_keep_te = int(test_valid_mask.sum())
+
+    # Apply descriptor-derived masks to align GVFA rows with descriptor rows.
+    # Fallback (mask length mismatch): keep the first n_keep rows by position —
+    # safe because both pipelines read the same CSV in the same order.
+    if len(train_valid_mask) == n_full_tr:
+        gvfa_tr = gvfa_tr[train_valid_mask]
+        y_tr    = y_tr[train_valid_mask]
+    else:
+        print(f"  [align] train mask length {len(train_valid_mask)} != "
+              f"GVFA rows {n_full_tr}; keeping first {n_keep_tr} rows")
+        gvfa_tr = gvfa_tr[:n_keep_tr]
+        y_tr    = y_tr[:n_keep_tr]
+
+    if len(test_valid_mask) == n_full_te:
+        gvfa_te = gvfa_te[test_valid_mask]
+        y_te    = y_te[test_valid_mask]
+    else:
+        print(f"  [align] test mask length {len(test_valid_mask)} != "
+              f"GVFA rows {n_full_te}; keeping first {n_keep_te} rows")
+        gvfa_te = gvfa_te[:n_keep_te]
+        y_te    = y_te[:n_keep_te]
+
+    print(f"  GVFA aligned: train {gvfa_tr.shape}  test {gvfa_te.shape}")
+    return gvfa_tr, y_tr, gvfa_te, y_te
 
 
 # ---------------------------------------------------------------------------
@@ -406,10 +490,15 @@ def fit_and_predict(regressor_name, X_train, y_train, X_test, y_test):
 def run_experiment(args):
     device = torch.device("cpu")
 
-    # Load raw data and build traditional descriptors once.
+    # ── Step 1: traditional descriptors (done once, before the HV loop) ──────
+    # build_traditional_features also returns boolean masks that identify which
+    # CSV rows have at least one valid descriptor.  These masks are used in
+    # Step 2 to drop the same molecules from the GVFA embeddings so both
+    # feature matrices have identical row counts.
     train_set = pd.read_csv(args.train_csv)
-    test_set = pd.read_csv(args.test_csv)
-    df298_train, df298_test = build_traditional_features(train_set, test_set)
+    test_set  = pd.read_csv(args.test_csv)
+    df298_train, df298_test, train_valid_mask, test_valid_mask = \
+        build_traditional_features(train_set, test_set)
 
     all_results = []
 
@@ -419,9 +508,13 @@ def run_experiment(args):
               f"regressor = {args.regressor}")
         print("=" * 70)
 
-        # GVFA embeddings for this HV dimension.
+        # ── Step 2: GVFA embeddings aligned to the descriptor molecule set ───
         train_emb, train_labels, test_emb, test_labels = build_gvfa_embeddings(
             hv_dim,
+            train_csv=args.train_csv,
+            test_csv=args.test_csv,
+            train_valid_mask=train_valid_mask,
+            test_valid_mask=test_valid_mask,
             num_layers=args.num_layers,
             delta=args.delta,
             equation=args.equation,
@@ -430,7 +523,7 @@ def run_experiment(args):
             device=device,
         )
 
-        # Combine + normalize.
+        # ── Step 3: combine + normalize ──────────────────────────────────────
         X_train, X_test = combine_features(
             args.combine,
             df298_train, df298_test,
@@ -441,7 +534,7 @@ def run_experiment(args):
         )
         print(f"X_train: {X_train.shape}   X_test: {X_test.shape}")
 
-        # Train + predict.
+        # ── Step 4: train + predict ───────────────────────────────────────────
         preds, y_test = fit_and_predict(
             args.regressor, X_train, train_labels, X_test, test_labels
         )
