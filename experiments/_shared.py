@@ -111,18 +111,15 @@ DESC_DETAIL = "123 RDKit + 128 Morgan FP + 7 func-groups + 38 engineered"
 
 def load_traditional_features():
     """
-    Return (df298_train, df298_test, train_set, test_set).
+    Return (df298_train, df298_test, train_set, test_set,
+            train_valid_mask, test_valid_mask).
 
-    Row counts in the returned dataframes are guaranteed to match
-    train_set / test_set because we reset indices and drop any rows
-    that contain ALL-NaN (produced when RDKit silently fails on a SMILES).
+    train_valid_mask / test_valid_mask are boolean arrays of length
+    equal to the ORIGINAL (unfiltered) CSV row count, so they can be
+    used to index into the full GVFA embedding arrays.
     """
-    train_set = pd.read_csv("final_data/final_unique_train_fixed.csv")
-    test_set  = pd.read_csv("final_data/final_unique_test.csv")
-
-    # reset index so concat aligns by position
-    train_set = train_set.reset_index(drop=True)
-    test_set  = test_set.reset_index(drop=True)
+    train_set = pd.read_csv("final_data/final_unique_train_fixed.csv").reset_index(drop=True)
+    test_set  = pd.read_csv("final_data/final_unique_test.csv").reset_index(drop=True)
 
     df123_train = utilities.generate123(train_set.smiles_canon).reset_index(drop=True)
     df123_test  = utilities.generate123(test_set.smiles_canon).reset_index(drop=True)
@@ -133,51 +130,42 @@ def load_traditional_features():
     df38_train  = utilities.generate_features38(train_set.smiles_canon).reset_index(drop=True)
     df38_test   = utilities.generate_features38(test_set.smiles_canon).reset_index(drop=True)
 
-    df298_train = pd.concat([df123_train, df128_train, df7_train, df38_train], axis=1)
-    df298_test  = pd.concat([df123_test,  df128_test,  df7_test,  df38_test],  axis=1)
+    df298_train_full = pd.concat([df123_train, df128_train, df7_train, df38_train], axis=1)
+    df298_test_full  = pd.concat([df123_test,  df128_test,  df7_test,  df38_test],  axis=1)
 
-    # find rows where RDKit silently failed (entire row is NaN) and drop them
-    # from BOTH the feature df and the corresponding dataset rows so they stay aligned
-    train_valid = df298_train.notna().any(axis=1)
-    test_valid  = df298_test.notna().any(axis=1)
+    # build masks from FULL (unfiltered) arrays — length matches GVFA output
+    train_valid = df298_train_full.notna().any(axis=1).values  # shape [N_full_train]
+    test_valid  = df298_test_full.notna().any(axis=1).values   # shape [N_full_test]
 
-    n_dropped_train = (~train_valid).sum()
-    n_dropped_test  = (~test_valid).sum()
-    if n_dropped_train > 0:
-        print(f"  [load_traditional_features] dropped {n_dropped_train} "
-              f"train rows where RDKit returned all-NaN")
-    if n_dropped_test > 0:
-        print(f"  [load_traditional_features] dropped {n_dropped_test} "
-              f"test rows where RDKit returned all-NaN")
+    n_drop_tr = (~train_valid).sum()
+    n_drop_te = (~test_valid).sum()
+    if n_drop_tr:
+        print(f"  [load_trad_features] dropped {n_drop_tr} train rows (RDKit all-NaN)")
+    if n_drop_te:
+        print(f"  [load_trad_features] dropped {n_drop_te} test rows (RDKit all-NaN)")
 
-    df298_train = df298_train[train_valid].reset_index(drop=True)
-    df298_test  = df298_test[test_valid].reset_index(drop=True)
+    # now filter both the feature df and the dataset rows
+    df298_train = df298_train_full[train_valid].reset_index(drop=True)
+    df298_test  = df298_test_full[test_valid].reset_index(drop=True)
     train_set   = train_set[train_valid].reset_index(drop=True)
     test_set    = test_set[test_valid].reset_index(drop=True)
 
-    return df298_train, df298_test, train_set, test_set
+    return df298_train, df298_test, train_set, test_set, train_valid, test_valid
 
 
 def load_traditional_features_aligned():
     """
-    Same as load_traditional_features() but also filters the GVFA-compatible
-    molecule list to the same valid SMILES — use this when you need to
-    concatenate descriptor features with GVFA embeddings row-by-row.
-
-    Returns (df298_train, df298_test, train_smiles, test_smiles,
-             train_labels, test_labels)
-    where train_smiles / test_smiles are the SMILES strings that survived
-    RDKit feature generation, for passing to build_gvfa_embeddings_for_smiles().
+    Convenience wrapper — returns everything exp9 needs in one call.
+    Returns (df298_train, df298_test, y_train, y_test,
+             train_valid_mask, test_valid_mask)
     """
-    df298_train, df298_test, train_set, test_set = load_traditional_features()
-    return (
-        df298_train,
-        df298_test,
-        train_set["smiles_canon"].tolist(),
-        test_set["smiles_canon"].tolist(),
-        train_set["logS"].values.astype(np.float32),
-        test_set["logS"].values.astype(np.float32),
-    )
+    df298_train, df298_test, train_set, test_set, \
+        train_valid, test_valid = load_traditional_features()
+
+    y_train = train_set["LogS"].values.astype(np.float32)
+    y_test  = test_set["LogS"].values.astype(np.float32)
+
+    return df298_train, df298_test, y_train, y_test, train_valid, test_valid
 
 
 def build_gvfa_embeddings(hv_dim: int):
@@ -208,37 +196,13 @@ def build_gvfa_embeddings(hv_dim: int):
     )
 
 
-def build_gvfa_embeddings_for_smiles(train_smiles, test_smiles,
-                                      train_labels_np, test_labels_np,
-                                      hv_dim: int):
-    """
-    Build GVFA embeddings for a specific list of SMILES strings (already
-    filtered to match the descriptor feature rows).
-
-    Use this instead of build_gvfa_embeddings() when concatenating with
-    traditional descriptors, to guarantee row alignment.
-
-    Returns (train_emb_np, test_emb_np, train_labels_np, test_labels_np)
-    all as float32 numpy arrays.
-    """
+def build_gvfa_embeddings_aligned(hv_dim: int, n_train_keep: int, n_test_keep: int,
+                                   train_valid_mask: np.ndarray,
+                                   test_valid_mask:  np.ndarray):
     train_data, test_data = load_data()
 
-    # build a smiles → row lookup from the full dataset
-    def _filter_by_smiles(data, keep_smiles):
-        keep_set = set(keep_smiles)
-        return [d for d in data if d.smiles in keep_set]
-
-    train_data_f = _filter_by_smiles(train_data, train_smiles)
-    test_data_f  = _filter_by_smiles(test_data,  test_smiles)
-
-    n_before = len(train_data)
-    n_after  = len(train_data_f)
-    if n_before != n_after:
-        print(f"  [build_gvfa_for_smiles] train: {n_before} → {n_after} "
-              f"(filtered to match descriptor rows)")
-
-    train_graphs = create_graph_list(train_data_f)
-    test_graphs  = create_graph_list(test_data_f)
+    train_graphs = create_graph_list(train_data)
+    test_graphs  = create_graph_list(test_data)
 
     train_HVs = VSA_conversion(train_graphs.copy(), hv_dim)
     test_HVs  = VSA_conversion(test_graphs.copy(),  hv_dim)
@@ -246,15 +210,45 @@ def build_gvfa_embeddings_for_smiles(train_smiles, test_smiles,
     in_dim = test_HVs[0].node_features.shape[1]
     model  = GraphCNN(in_dim, NUM_LAYERS, DELTA, GRAPH_POOL, NEIGHBOR_POOL, DEVICE, EQUATION)
 
-    train_emb, _ = getEmbedding(model, DEVICE, train_HVs)
-    test_emb,  _ = getEmbedding(model, DEVICE, test_HVs)
+    train_emb, train_labels = getEmbedding(model, DEVICE, train_HVs)
+    test_emb,  test_labels  = getEmbedding(model, DEVICE, test_HVs)
 
-    return (
-        to_numpy(train_emb.squeeze(0)),
-        to_numpy(test_emb.squeeze(0)),
-        train_labels_np,
-        test_labels_np,
-    )
+    gvfa_tr = to_numpy(train_emb.squeeze(0))
+    gvfa_te = to_numpy(test_emb.squeeze(0))
+    y_tr    = to_numpy(train_labels).ravel()
+    y_te    = to_numpy(test_labels).ravel()
+
+    # rebuild mask from scratch using actual GVFA array length
+    # this is safe because the mask just marks the same failed molecules
+    n_full_tr = gvfa_tr.shape[0]
+    n_full_te = gvfa_te.shape[0]
+
+    if len(train_valid_mask) != n_full_tr:
+        print(f"  [align] mask length {len(train_valid_mask)} != GVFA rows {n_full_tr}. "
+              f"Dropping last {n_full_tr - n_train_keep} rows to match descriptor count.")
+        # fallback: keep first n_train_keep rows (same molecules, consistent ordering)
+        gvfa_tr = gvfa_tr[:n_train_keep]
+        y_tr    = y_tr[:n_train_keep]
+    else:
+        gvfa_tr = gvfa_tr[train_valid_mask]
+        y_tr    = y_tr[train_valid_mask]
+
+    if len(test_valid_mask) != n_full_te:
+        print(f"  [align] test mask length {len(test_valid_mask)} != GVFA rows {n_full_te}. "
+              f"Keeping first {n_test_keep} rows.")
+        gvfa_te = gvfa_te[:n_test_keep]
+        y_te    = y_te[:n_test_keep]
+    else:
+        gvfa_te = gvfa_te[test_valid_mask]
+        y_te    = y_te[test_valid_mask]
+
+    assert gvfa_tr.shape[0] == n_train_keep, \
+        f"Alignment failed: gvfa_train={gvfa_tr.shape[0]} vs desc_train={n_train_keep}"
+    assert gvfa_te.shape[0] == n_test_keep, \
+        f"Alignment failed: gvfa_test={gvfa_te.shape[0]} vs desc_test={n_test_keep}"
+
+    print(f"  [build_gvfa_aligned] train={gvfa_tr.shape}  test={gvfa_te.shape}")
+    return gvfa_tr, gvfa_te, y_tr, y_te
 
 
 def fit_xgb_and_report(X_train, y_train, X_test, y_test, label: str):

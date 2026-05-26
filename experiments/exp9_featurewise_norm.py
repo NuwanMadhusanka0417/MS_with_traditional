@@ -173,33 +173,32 @@ def run():
     print(f"\n[Exp 9] Type-aware feature-wise normalization | HV dim = {HV_DIM}")
     print(f"        binary→{{-1,+1}}  near-const→drop  continuous→tanh(IQR)\n")
 
-    # ── traditional features (aligned — drops RDKit-failed rows) ─────────────
     from experiments._shared import (
         load_traditional_features_aligned,
-        build_gvfa_embeddings_for_smiles,
+        build_gvfa_embeddings_aligned,
     )
+
+    # ── traditional features + valid masks ───────────────────────────────────
     df298_train, df298_test, \
-        train_smiles, test_smiles, \
-        y_train, y_test = load_traditional_features_aligned()
+        y_train, y_test, \
+        train_mask, test_mask = load_traditional_features_aligned()
 
     norm = TypeAwareNormalizer()
     norm.fit(df298_train)
 
-    desc_tr = norm.transform(df298_train)   # [N_train, kept_cols]
-    desc_te = norm.transform(df298_test)    # [N_test,  kept_cols]
+    desc_tr = norm.transform(df298_train)
+    desc_te = norm.transform(df298_test)
 
     print(f"  Descriptor block shape after norm: train={desc_tr.shape}  test={desc_te.shape}")
 
-    # ── GVFA embeddings — filtered to same SMILES as descriptor rows ──────────
-    gvfa_tr, gvfa_te, y_train, y_test = build_gvfa_embeddings_for_smiles(
-        train_smiles, test_smiles, y_train, y_test, HV_DIM
+    # ── GVFA embeddings aligned via same mask ─────────────────────────────────
+    gvfa_tr, gvfa_te, y_train, y_test = build_gvfa_embeddings_aligned(
+        hv_dim          = HV_DIM,
+        n_train_keep    = desc_tr.shape[0],
+        n_test_keep     = desc_te.shape[0],
+        train_valid_mask= train_mask,
+        test_valid_mask = test_mask,
     )
-
-    # ── sanity check ─────────────────────────────────────────────────────────
-    assert desc_tr.shape[0] == gvfa_tr.shape[0], \
-        f"Row mismatch after alignment: desc={desc_tr.shape[0]}, gvfa={gvfa_tr.shape[0]}"
-    assert desc_te.shape[0] == gvfa_te.shape[0], \
-        f"Row mismatch after alignment: desc={desc_te.shape[0]}, gvfa={gvfa_te.shape[0]}"
 
     # ── concatenate ──────────────────────────────────────────────────────────
     X_train = np.concatenate([desc_tr, gvfa_tr], axis=1)
