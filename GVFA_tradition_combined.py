@@ -66,6 +66,59 @@ mirror the original notebook so results stay consistent.
 ============================================================================
 """
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  OFFLINE MODE — must run BEFORE deepchem is imported anywhere.
+#  DeepChem's CGCNNFeaturizer calls download_url() at IMPORT TIME (inside
+#  deepchem/__init__.py → molnet → CGCNN). On NCI compute nodes there is no
+#  outbound network, so the import crashes.
+#
+#  We patch the stdlib network primitives (urllib.request) that deepchem
+#  ultimately calls. urllib.request has no import side effects, so patching it
+#  first guarantees no network access when deepchem later imports via
+#  `src.utilities`.
+#
+#  If a pre-staged copy of the requested file exists in offline_data/, it is
+#  copied to the destination; otherwise the call becomes a harmless no-op
+#  (an empty placeholder file is created and a warning is emitted).
+# ══════════════════════════════════════════════════════════════════════════════
+import os
+import shutil
+import urllib.request as _urlreq
+
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+_OFFLINE_DIR  = os.path.join(_PROJECT_ROOT, "offline_data")
+
+os.environ["DEEPCHEM_DATA_DIR"] = _OFFLINE_DIR
+os.makedirs(_OFFLINE_DIR, exist_ok=True)
+
+_real_urlretrieve = _urlreq.urlretrieve
+
+def _offline_urlretrieve(url, filename=None, *args, **kwargs):
+    """Offline replacement for urllib.request.urlretrieve — never hits network."""
+    name = url.split("/")[-1]
+
+    if filename is None:
+        filename = os.path.join(_OFFLINE_DIR, name)
+
+    if os.path.exists(filename):
+        return filename, None
+
+    staged = os.path.join(_OFFLINE_DIR, name)
+    if os.path.exists(staged) and os.path.abspath(staged) != os.path.abspath(filename):
+        os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
+        shutil.copy(staged, filename)
+        return filename, None
+
+    import warnings as _w
+    _w.warn(f"[offline] network blocked; '{name}' not found in offline_data/. "
+            f"Writing empty placeholder at {filename}.")
+    os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
+    open(filename, "a").close()
+    return filename, None
+
+_urlreq.urlretrieve = _offline_urlretrieve
+# ══════════════════════════════════════════════════════════════════════════════
+
 import argparse
 import copy
 import warnings
@@ -86,7 +139,10 @@ from xgboost import XGBRegressor
 
 from rdkit import RDLogger
 
-# Project-local imports (same as the notebook)
+# Project-local imports (same as the notebook).
+# NOTE: `src.utilities` does `import deepchem as dc` at module load, which
+# triggers a network download unless the urlretrieve patch above is already
+# installed. Do not move these imports above the OFFLINE MODE block.
 from src.create_graphs import create_graph_list
 from src.load_data import load_data
 from src.VSA_conversion import VSA_conversion
