@@ -9,7 +9,9 @@ from src.embeddings import getEmbedding
 from models.graphcnnVSA_Binding_FULL import GraphCNN
 import torch
 from xgboost import XGBRegressor
-from src import utilities
+from sklearn.metrics import mean_absolute_error as mae
+from sklearn.metrics import mean_squared_error as mse
+from sklearn.metrics import r2_score as r2
 
 if os.path.exists("offline_data/df298_train.parquet"):
     print("Loading cached df298 ...")
@@ -24,6 +26,15 @@ HV_Dimentions = [200]
 scaler_298 = StandardScaler()
 scaler_298.fit(df298_train.values)   # each column: its own mean/std
 
+def get_errors1(y_true, y_pred, model_name="Model"):   
+    err_mae = round(mae(y_true, y_pred), 4)
+    err_rmse = round(np.sqrt(mse(y_true, y_pred)), 4)
+    err_r2 = round(r2(y_true, y_pred), 4)
+    err_mse = round(mse(y_true, y_pred), 4)
+        
+    results = np.column_stack([model_name, err_mae, err_mse, err_rmse, err_r2])
+    df_results = pd.DataFrame(results, columns=['Model_Name', 'MAE', 'MSE', 'RMSE', 'R2'])
+    return df_results
 
 for HV_Dimention in HV_Dimentions:
 
