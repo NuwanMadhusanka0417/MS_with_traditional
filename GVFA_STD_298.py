@@ -36,29 +36,29 @@ def get_errors1(y_true, y_pred, model_name="Model"):
     df_results = pd.DataFrame(results, columns=['Model_Name', 'MAE', 'MSE', 'RMSE', 'R2'])
     return df_results
 
+train_data, test_data = load_data(dataset="new")
+# print(train_data[0].edge_attr)
+print(len(train_data))
+print(len(test_data))
+
+# train_graphs = create_graph_list(train_data)
+# test_graphs = create_graph_list(test_data)
+
+
+num_layers = 5
+delta_eq1 = 1
+equation_eq1 = 10
+graph_pooling_type = 'sum'  # sum, average
+neighbor_pooling_type = 'sum' # sum, average, max
+device = 1  # help='if delta is 1 will be the model with binding, if 0 model will have be without binding (default: 1)'
+device = torch.device('cpu')
+
+train_graphs = create_graph_list(train_data)
+test_graphs = create_graph_list(test_data)
+ts_graph = test_graphs.copy()
+tr_graph = train_graphs.copy()
+
 for HV_Dimention in HV_Dimentions:
-
-    train_data, test_data = load_data(dataset="new")
-    # print(train_data[0].edge_attr)
-    print(len(train_data))
-    print(len(test_data))
-
-    # train_graphs = create_graph_list(train_data)
-    # test_graphs = create_graph_list(test_data)
-
-
-    num_layers = 5
-    delta_eq1 = 1
-    equation_eq1 = 10
-    graph_pooling_type = 'sum'  # sum, average
-    neighbor_pooling_type = 'sum' # sum, average, max
-    device = 1  # help='if delta is 1 will be the model with binding, if 0 model will have be without binding (default: 1)'
-    device = torch.device('cpu')
-    
-    train_graphs = create_graph_list(train_data)
-    test_graphs = create_graph_list(test_data)
-    ts_graph = test_graphs.copy()
-    tr_graph = train_graphs.copy()
 
     test_HVs = VSA_conversion(ts_graph, HV_Dimention)
     train_HVs = VSA_conversion(tr_graph, HV_Dimention)
@@ -108,6 +108,6 @@ for HV_Dimention in HV_Dimentions:
 
     pred_xgb = xgb.predict(X_test)
     
-    xgb_298=utilities.get_errors1(test_labels_eq1,pred_xgb,f"XGB_298 concatinate GVFA({HV_Dimention})")
+    xgb_298=get_errors1(test_labels_eq1,pred_xgb,f"XGB_298 concatinate GVFA({HV_Dimention})")
     xgb_298['Descriptors_Detail']='125 features + 128 fingerprint 7 f_group+38 fe features'
     print(xgb_298)

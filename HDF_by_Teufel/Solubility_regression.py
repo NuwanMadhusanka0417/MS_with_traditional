@@ -29,7 +29,7 @@ from xgboost import XGBRegressor
 
 TRAIN_CSV = "../final_data/final_unique_train_fixed.csv"
 TEST_CSV = "../final_data/final_unique_test.csv"
-TARGET_COL = "logS"
+TARGET_COL = "LogS"
 SMILES_COL = "SMILES"
 SEEDS = [0, 1, 2, 3, 4]
 DIMENSIONS = [1000, 2000, 5000, 10000]
