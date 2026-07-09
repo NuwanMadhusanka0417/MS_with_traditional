@@ -6,7 +6,7 @@ from src.create_graphs import create_graph_list
 from src.load_data import load_data
 from src.VSA_conversion import VSA_conversion
 from src.embeddings import getEmbedding
-from models.graphcnnVSA_Binding_FULL import GraphCNN
+from models.graphcnnVSA_Binding_FULL_old import GraphCNN
 import torch
 from xgboost import XGBRegressor
 from sklearn.metrics import mean_absolute_error as mae
@@ -21,7 +21,7 @@ if os.path.exists("offline_data/df298_train.parquet"):
     # test_valid  = np.load("offline_data/test_valid_mask.npy")
     
 
-HV_Dimentions = [200]
+HV_Dimentions = [100,500,1000,2000,5000,10000]
 
 scaler_298 = StandardScaler()
 scaler_298.fit(df298_train.values)   # each column: its own mean/std
