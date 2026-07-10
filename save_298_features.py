@@ -85,9 +85,9 @@ print(len(df298_train))
 print(len(df298_test))
 import os
 os.makedirs("cached_features", exist_ok=True)
-# Option A: save final combined features
-# df298_train.to_parquet("offline_data/df298_train.parquet")
-# df298_test.to_parquet("offline_data/df298_test.parquet")
+#Option A: save final combined features
+df298_train.to_parquet("offline_data/df298_train.parquet")
+df298_test.to_parquet("offline_data/df298_test.parquet")
 # Also save masks (needed for GVFA alignment)
 # import numpy as np
 # np.save("cached_features/train_valid_mask.npy", train_valid)
