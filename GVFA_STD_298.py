@@ -25,7 +25,7 @@ from sklearn.metrics import r2_score as r2
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
 
-from models.graphcnnVSA_Binding_FULL_old import GraphCNN
+from models.graphcnnVSA_Binding_FULL_edge import GraphCNN
 from src.create_graphs import create_graph_list
 from src.embeddings import getEmbedding
 from src.load_data import load_data
@@ -135,11 +135,18 @@ for HV_Dimention in HV_Dimentions:
         train_HVs = project_with_vsa(train_graphs, HV_Dimention, seed=seed)
         test_HVs  = project_with_vsa(test_graphs,  HV_Dimention, seed=seed)
 
+        # Edge-conditioned GVFA: concat(neighbor HV, edge HV) then reduce to D.
+        # edge_attr is [E, 5] from create_graphs (bond type, conjugated, ring, length, stereo).
+        edge_feat_dim = getattr(train_HVs[0], "edge_attr", None)
+        edge_feat_dim = edge_feat_dim.shape[1] if edge_feat_dim is not None else 5
+
         model_eq1 = GraphCNN(
             train_HVs[0].node_features.shape[1],
             num_layers, delta_eq1,
             graph_pooling_type, neighbor_pooling_type,
             device, equation_eq1,
+            edge_feat_dim=edge_feat_dim,
+            rng_seed=seed,
         )
 
         train_embeddings, train_labels = getEmbedding(model_eq1, device, train_HVs)
