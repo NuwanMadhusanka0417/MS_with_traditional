@@ -1,13 +1,15 @@
 """
-GVFA + 298 traditional descriptors sweep.
+GVFA sweep — GVFA-only or GVFA + 298 traditional descriptors.
 
 Usage
 -----
-    python GVFA_STD_298.py
-    python GVFA_STD_298.py --seeds 0,1,2,3,4
-    python GVFA_STD_298.py --seeds 0,1,2,3,4 --dims 100,500,1000,2000,5000,10000
+    # Combined (default): GVFA embeddings + scaled df298 features
+    python GVFA_STD_298.py --mode combined --seeds 0,1,2,3,4
 
-Results are printed and saved to results_gvfa_298.csv.
+    # GVFA-only: embeddings without traditional descriptors
+    python GVFA_STD_298.py --mode gvfa --seeds 0,1,2,3,4 --dims 100,500,1000
+
+Results are printed and saved to results_gvfa_only.csv or results_gvfa_298.csv.
 """
 
 import argparse
@@ -30,7 +32,11 @@ from src.load_data import load_data
 from src.VSA_conversion import VSA_conversion, project_with_vsa
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="GVFA + 298 descriptor sweep")
+parser = argparse.ArgumentParser(description="GVFA sweep (GVFA-only or combined)")
+parser.add_argument(
+    "--mode", type=str, default="combined", choices=["gvfa", "combined"],
+    help="'gvfa' = GVFA embeddings only; 'combined' = GVFA + scaled df298 (default)",
+)
 parser.add_argument(
     "--seeds", type=str, default="0",
     help="Comma-separated seed values (default: 0), e.g. --seeds 0,1,2,3,4",
@@ -41,33 +47,39 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
+MODE          = args.mode
 SEEDS         = [int(s.strip()) for s in args.seeds.split(",")]
 HV_Dimentions = [int(d.strip()) for d in args.dims.split(",")]
+RESULTS_CSV   = "results_gvfa_only.csv" if MODE == "gvfa" else "results_gvfa_298.csv"
 
+print(f"Mode        : {MODE}")
 print(f"Seeds       : {SEEDS}")
 print(f"HV dims     : {HV_Dimentions}")
 
-# ── Traditional features (cached) ────────────────────────────────────────────
-if os.path.exists("offline_data/df298_train.parquet"):
-    print("Loading cached df298 ...")
-    df298_train = pd.read_parquet("offline_data/df298_train.parquet")
-    df298_test  = pd.read_parquet("offline_data/df298_test.parquet")
-else:
-    raise FileNotFoundError(
-        "offline_data/df298_train.parquet not found. "
-        "Run save_298_features.py first."
+# ── Traditional features (combined mode only) ─────────────────────────────────
+df_torch_train = None
+df_torch_test  = None
+
+if MODE == "combined":
+    if os.path.exists("offline_data/df298_train.parquet"):
+        print("Loading cached df298 ...")
+        df298_train = pd.read_parquet("offline_data/df298_train.parquet")
+        df298_test  = pd.read_parquet("offline_data/df298_test.parquet")
+    else:
+        raise FileNotFoundError(
+            "offline_data/df298_train.parquet not found. "
+            "Run save_298_features.py first."
+        )
+
+    scaler_298 = StandardScaler()
+    scaler_298.fit(df298_train.values)
+
+    df_torch_train = torch.from_numpy(
+        scaler_298.transform(df298_train.values).astype(np.float32)
     )
-
-scaler_298 = StandardScaler()
-scaler_298.fit(df298_train.values)
-
-# Scale once and convert to float32 tensors — reused every iteration.
-df_torch_train = torch.from_numpy(
-    scaler_298.transform(df298_train.values).astype(np.float32)
-)
-df_torch_test = torch.from_numpy(
-    scaler_298.transform(df298_test.values).astype(np.float32)
-)
+    df_torch_test = torch.from_numpy(
+        scaler_298.transform(df298_test.values).astype(np.float32)
+    )
 
 
 def get_errors1(y_true, y_pred, model_name="Model"):
@@ -136,8 +148,12 @@ for HV_Dimention in HV_Dimentions:
         train_embeddings = train_embeddings.squeeze(0)
         test_embeddings  = test_embeddings.squeeze(0)
 
-        X_train = torch.cat([df_torch_train, train_embeddings], dim=1)
-        X_test  = torch.cat([df_torch_test,  test_embeddings],  dim=1)
+        if MODE == "gvfa":
+            X_train = train_embeddings
+            X_test  = test_embeddings
+        else:
+            X_train = torch.cat([df_torch_train, train_embeddings], dim=1)
+            X_test  = torch.cat([df_torch_test,  test_embeddings],  dim=1)
         print(f"X_train: {X_train.shape}  X_test: {X_test.shape}")
 
         xgb = XGBRegressor(
@@ -156,13 +172,18 @@ for HV_Dimention in HV_Dimentions:
 
         pred_xgb = xgb.predict(X_test)
 
-        row = get_errors1(
-            test_labels, pred_xgb,
-            f"XGB_298 GVFA(dim={HV_Dimention} seed={seed})",
-        )
+        if MODE == "gvfa":
+            model_label = f"XGB GVFA-only(dim={HV_Dimention} seed={seed})"
+            desc_detail = "GVFA embeddings only"
+        else:
+            model_label = f"XGB_298 GVFA(dim={HV_Dimention} seed={seed})"
+            desc_detail = "125 features + 128 fingerprint 7 f_group+38 fe features"
+
+        row = get_errors1(test_labels, pred_xgb, model_label)
         row["seed"] = seed
         row["dim"]  = HV_Dimention
-        row["Descriptors_Detail"] = "125 features + 128 fingerprint 7 f_group+38 fe features"
+        row["mode"] = MODE
+        row["Descriptors_Detail"] = desc_detail
         all_results.append(row)
         print(row)
 
@@ -174,5 +195,5 @@ for HV_Dimention in HV_Dimentions:
 summary = pd.concat(all_results, ignore_index=True)
 print("\n=== Full Results ===")
 print(summary.to_string(index=False))
-summary.to_csv("results_gvfa_298.csv", index=False)
-print("\nSaved to results_gvfa_298.csv")
+summary.to_csv(RESULTS_CSV, index=False)
+print(f"\nSaved to {RESULTS_CSV}")
